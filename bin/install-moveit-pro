@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Installed at /usr/local/sbin/install-moveit-pro (root:root 0755).
+# Invoked by CI via `sudo -n install-moveit-pro <version>`.
+# Sudoers grants NOPASSWD on this script only; downloads to a root-owned
+# cache dir so the unprivileged CI user cannot plant a malicious .deb.
+
+set -euo pipefail
+umask 022
+
+VERSION="${1:?version required (e.g. 9.2.0 or 9.2.0-rc6)}"
+
+if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?$ ]]; then
+  echo "Invalid version format: $VERSION" >&2
+  exit 2
+fi
+
+# Default workspace: public example_ws pinned to the release version.
+# Override per-machine via /etc/moveit-pro-cd.conf (root-owned, installed by
+# install.sh). The defaults below reproduce the pre-config-file behavior.
+WORKSPACE_REPO="https://github.com/PickNikRobotics/moveit_pro_example_ws.git"
+WORKSPACE_DIR="moveit_pro_example_ws"
+WORKSPACE_BRANCH=""
+WORKSPACE_PIN_TO_RELEASE="true"
+
+CONFIG_FILE="/etc/moveit-pro-cd.conf"
+if [[ -f "$CONFIG_FILE" ]]; then
+  # Only root can write this file (install.sh enforces 0644 root:root) so
+  # sourcing it is no broader than running this script.
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+
+# WORKSPACE_REPO is passed to `git clone` as-is, so block anything that isn't
+# one of the two GitHub URL forms we use.
+if ! [[ "$WORKSPACE_REPO" =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$ ]] \
+   && ! [[ "$WORKSPACE_REPO" =~ ^git@github\.com:[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.git$ ]]; then
+  echo "Invalid WORKSPACE_REPO: $WORKSPACE_REPO" >&2
+  exit 2
+fi
+
+# WORKSPACE_DIR is appended to a path, so reject anything that could escape it.
+if ! [[ "$WORKSPACE_DIR" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid WORKSPACE_DIR: $WORKSPACE_DIR" >&2
+  exit 2
+fi
+
+if [[ "$WORKSPACE_PIN_TO_RELEASE" == "true" ]]; then
+  CLONE_BRANCH="$VERSION"
+else
+  if [[ -z "$WORKSPACE_BRANCH" ]]; then
+    echo "WORKSPACE_PIN_TO_RELEASE=false but WORKSPACE_BRANCH is empty" >&2
+    exit 2
+  fi
+  CLONE_BRANCH="$WORKSPACE_BRANCH"
+fi
+
+CACHE_DIR=/var/cache/moveit-pro
+DEB="$CACHE_DIR/moveit-pro-${VERSION}-any.deb"
+URL="https://download.picknik.ai/moveit-pro/moveit-pro-${VERSION}-any.deb"
+
+install -d -m 0755 -o root -g root "$CACHE_DIR"
+curl -fL --proto '=https' --tlsv1.2 "$URL" -o "$DEB"
+chown root:root "$DEB"
+chmod 0644 "$DEB"
+
+# Full uninstall before install to clear stale workspace/config from older versions.
+# .config/moveit_pro is preserved — per-machine config set up once at provisioning.
+DEBIAN_FRONTEND=noninteractive apt-get purge -y moveit-pro || true
+
+if [[ -n "${SUDO_USER:-}" && "$SUDO_USER" != "root" ]]; then
+  USER_HOME="$(getent passwd "$SUDO_USER" | cut -d: -f6)"
+  if [[ -n "$USER_HOME" ]]; then
+    # Reclone the configured workspace. Only delete the workspace dir itself —
+    # other siblings under ~/moveit_pro/ (e.g. customer-specific artifacts on
+    # Jetsons) must survive across CD runs.
+    WS_PARENT="$USER_HOME/moveit_pro"
+    WS_DIR="$WS_PARENT/$WORKSPACE_DIR"
+    if [[ -d "$WS_DIR" ]]; then
+      rm -rf -- "$WS_DIR"
+    fi
+    sudo -u "$SUDO_USER" -H mkdir -p -- "$WS_PARENT"
+    sudo -u "$SUDO_USER" -H git clone \
+      --branch "$CLONE_BRANCH" \
+      --recurse-submodules \
+      "$WORKSPACE_REPO" \
+      "$WS_DIR"
+    sudo -u "$SUDO_USER" -H git -C "$WS_DIR" submodule update --init --recursive
+    sudo -u "$SUDO_USER" -H git -C "$WS_DIR" lfs pull
+    sudo -u "$SUDO_USER" -H git -C "$WS_DIR" submodule foreach --recursive git lfs pull
+  fi
+fi
+
+DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$DEB"
+rm -f "$DEB"

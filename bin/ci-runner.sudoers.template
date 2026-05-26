@@ -1,0 +1,8 @@
+# Installed at /etc/sudoers.d/__CI_USER__-ci (root:root 0440).
+# install.sh substitutes __CI_USER__ with the local account used by CI.
+# Grants NOPASSWD on exactly the commands the CD pipeline needs — no
+# wildcards, no apt-get, no shells.
+
+__CI_USER__ ALL=(root) NOPASSWD: /usr/local/sbin/install-moveit-pro
+__CI_USER__ ALL=(root) NOPASSWD: /bin/systemctl restart moveit-pro@__CI_USER__.service
+__CI_USER__ ALL=(root) NOPASSWD: /bin/systemctl stop moveit-pro@__CI_USER__.service

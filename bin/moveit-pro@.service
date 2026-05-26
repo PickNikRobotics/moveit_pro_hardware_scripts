@@ -1,0 +1,20 @@
+[Unit]
+Description=MoveIt Pro
+After=network-online.target docker.service virtual-screen.service
+Requires=docker.service virtual-screen.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Environment=DISPLAY=:99
+EnvironmentFile=-/etc/default/moveit-pro
+ExecStart=/usr/bin/moveit_pro run -v --no-browser
+ExecStop=/usr/bin/moveit_pro down
+KillMode=mixed
+TimeoutStopSec=60
+Restart=no
+ExecStopPost=-/usr/bin/notify-crash.py moveit-pro@%i.service
+
+[Install]
+WantedBy=multi-user.target
