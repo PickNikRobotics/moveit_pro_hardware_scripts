@@ -30,7 +30,16 @@ fi
 if ! python3 -c "import roslibpy" 2>/dev/null; then
     echo "Installing roslibpy"
     sudo apt-get install -y python3-pip
-    python3 -m pip install --break-system-packages --ignore-installed roslibpy
+    # PEP 668: pip >= 23 on externally-managed Pythons (Ubuntu 23.04+,
+    # Debian 12+) refuses system-wide installs without --break-system-packages.
+    # Older pip (Ubuntu 22.04 ships 22.0.2) does not recognize the flag at all.
+    # Gate on the EXTERNALLY-MANAGED marker — present iff the flag is needed
+    # and supported.
+    PIP_ARGS=(--ignore-installed)
+    if compgen -G "/usr/lib/python3*/EXTERNALLY-MANAGED" > /dev/null; then
+        PIP_ARGS+=(--break-system-packages)
+    fi
+    python3 -m pip install "${PIP_ARGS[@]}" roslibpy
 fi
 
 echo "Installing CD objective shared library to /usr/lib/moveit-pro-scripts/"
