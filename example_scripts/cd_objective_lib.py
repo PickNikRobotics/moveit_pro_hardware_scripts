@@ -26,7 +26,6 @@ ROSBRIDGE_PORT = 3201
 
 ACTION_NAME = "/do_objective"
 ACTION_TYPE = "moveit_studio_sdk_msgs/action/DoObjectiveSequence"
-ACTION_STATUS_TOPIC = f"{ACTION_NAME}/_action/status"
 
 TOTAL_TIMEOUT_S = 3600
 POLL_INTERVAL_S = 10
@@ -108,29 +107,42 @@ def _connect_rosbridge(client: roslibpy.Ros, deadline: float) -> None:
     _fail("Timeout: rosbridge websocket did not connect within 1h")
 
 
-def _get_topics(client: roslibpy.Ros) -> list:
-    result = {"topics": None}
+def _get_action_servers(client: roslibpy.Ros) -> list:
+    """Query rosapi for the list of advertised action servers.
+
+    /rosapi/topics filters hidden topics (anything matching `_action/*`), so
+    enumerating via topics misses every ROS 2 action. /rosapi/action_servers
+    returns the action names directly.
+    """
+    result = {"servers": []}
     done = Event()
 
     def _ok(resp):
-        result["topics"] = resp.get("topics", []) if isinstance(resp, dict) else []
+        # resp is roslibpy.ServiceResponse (dict-like but not a dict subclass)
+        # in current roslibpy; access via .get to stay compatible if that ever
+        # changes back to a plain dict.
+        result["servers"] = resp.get("action_servers", []) or []
         done.set()
 
     def _err(err):
-        print(f"rosapi topics call failed: {err}")
+        print(f"rosapi action_servers call failed: {err}")
         done.set()
 
-    client.get_topics(_ok, _err)
+    service = roslibpy.Service(
+        client, "/rosapi/action_servers", "rosapi_msgs/srv/GetActionServers"
+    )
+    service.call(roslibpy.ServiceRequest(), callback=_ok, errback=_err)
     if not done.wait(timeout=ROSAPI_CALL_TIMEOUT_S):
+        print("rosapi action_servers: timed out waiting for response", file=sys.stderr)
         return []
-    return result["topics"] or []
+    return result["servers"]
 
 
 def _wait_for_action_server(client: roslibpy.Ros, deadline: float) -> None:
     attempt = 0
     while time.monotonic() < deadline:
         attempt += 1
-        if ACTION_STATUS_TOPIC in _get_topics(client):
+        if ACTION_NAME in _get_action_servers(client):
             print(f"{ACTION_NAME} action server is up (attempt {attempt})")
             return
         print(f"Waiting for {ACTION_NAME} action server... (attempt {attempt})")
