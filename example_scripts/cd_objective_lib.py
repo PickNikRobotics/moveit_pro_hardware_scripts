@@ -2,24 +2,44 @@
 """Shared CD objective runner.
 
 Connects to rosbridge, waits up to 1 hour for the /do_objective action server,
-sends the objective goal, then exits. On timeout: stops the moveit-pro service
-and posts a Slack failure notification using the same webhook as notify-crash.
+sends the objective goal, then exits. On timeout: stops the moveit-pro service,
+posts a Slack failure notification using the same webhook as notify-crash, and
+opens or updates a deduplicated GitHub issue (see notify_lib).
 
 Intended to be launched detached from CI over SSH; the calling shell can
 exit immediately and the script will continue running on the host.
 """
 
-import json
 import os
 import socket
 import subprocess
 import sys
 import time
-import urllib.request
 from threading import Event
 
 import roslibpy
 from roslibpy import ActionClient
+
+# Shared notification helpers live alongside this module once installed.
+sys.path.insert(0, "/usr/lib/moveit-pro-scripts")
+
+try:
+    from notify_lib import build_payload, github_issue, slack_post
+except ImportError as exc:
+    # A partial install / image skew must not stop the objective runner from
+    # running and stopping the service — notifications are auxiliary. Degrade
+    # to no-ops, loudly.
+    print(f"notify_lib unavailable, notifications disabled: {exc}", file=sys.stderr)
+
+    def build_payload(process_time, date=None):
+        return {"process_time": process_time}
+
+    def slack_post(payload, dry_run=False):
+        pass
+
+    def github_issue(title, reason, version=None, dry_run=False):
+        pass
+
 
 ROSBRIDGE_HOST = "localhost"
 ROSBRIDGE_PORT = 3201
@@ -33,28 +53,18 @@ ROSBRIDGE_CONNECT_TIMEOUT_S = 10
 ROSAPI_CALL_TIMEOUT_S = 10
 SEND_GOAL_DRAIN_S = 5
 
-WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+# Objective context for the GitHub issue title, set once the runner knows which
+# objective(s) it is driving. None until then (e.g. rosbridge never came up).
+_current_objective = None
+
+
+def _failure_title() -> str:
+    suffix = f" — {_current_objective}" if _current_objective else ""
+    return f"QA deployment failure: {socket.gethostname()}{suffix}"
 
 
 def _slack_post(message: str) -> None:
-    if not WEBHOOK_URL:
-        print(f"SLACK_WEBHOOK_URL not set; skipping notify: {message}", file=sys.stderr)
-        return
-    payload = {
-        "date": time.strftime("%a %Y-%m-%d %H:%M:%S %Z"),
-        "laptop_name": socket.gethostname(),
-        "process_time": message,
-    }
-    try:
-        req = urllib.request.Request(
-            WEBHOOK_URL,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=30)
-        print(f"Slack notified: {message}")
-    except Exception as exc:
-        print(f"Slack notify failed: {exc}", file=sys.stderr)
+    slack_post(build_payload(message))
 
 
 def _stop_service() -> None:
@@ -73,6 +83,7 @@ def _stop_service() -> None:
 def _fail(reason: str):
     print(reason, file=sys.stderr)
     _slack_post(reason)
+    github_issue(_failure_title(), reason)
     _stop_service()
     sys.exit(1)
 
@@ -151,6 +162,8 @@ def _wait_for_action_server(client: roslibpy.Ros, deadline: float) -> None:
 
 
 def run_objective(objective_name: str) -> None:
+    global _current_objective
+    _current_objective = objective_name
     deadline = time.monotonic() + TOTAL_TIMEOUT_S
     client = roslibpy.Ros(host=ROSBRIDGE_HOST, port=ROSBRIDGE_PORT)
 
@@ -187,6 +200,8 @@ def _send_and_wait(
     crashes still get caught by the systemd notify-crash hook. We only
     fail() on rosbridge errors or timeouts.
     """
+    global _current_objective
+    _current_objective = objective_name
     done = Event()
 
     def _on_result(_result):
@@ -226,10 +241,18 @@ def run_objectives_forever(
     Used by customer-config CD machines whose BT XML does not self-loop
     (Clean-Botix populate_mission_scene + test_change_tool, Auto Wash
     Test Run Job). Stuck objectives or rosbridge errors call _fail() which
-    Slacks and stops the systemd unit; healthy iterations log and continue.
+    Slacks, files a GitHub issue, and stops the systemd unit; healthy
+    iterations log and continue.
     """
     if not objectives:
         _fail("run_objectives_forever called with empty objectives list")
+
+    # Seed the issue-title context with the whole list. _send_and_wait narrows
+    # it to the specific objective once we start sending; this initial value is
+    # only what a pre-send failure (rosbridge / action server never came up)
+    # reports.
+    global _current_objective
+    _current_objective = ", ".join(objectives)
 
     deadline = time.monotonic() + TOTAL_TIMEOUT_S
     client = roslibpy.Ros(host=ROSBRIDGE_HOST, port=ROSBRIDGE_PORT)
