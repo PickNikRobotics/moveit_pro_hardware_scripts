@@ -9,9 +9,10 @@ The full setup walkthrough lives at [Set Up CI/CD](https://docs.picknik.ai/how_t
 - `install.sh` — one-shot installer. Copies the wrapper, systemd unit, and sudoers drop-in into place. Run on each target machine.
 - `bin/install-moveit-pro` — root-owned installer wrapper. Validates the version string against a strict regex, downloads the `.deb` to a root-owned cache, installs it, and deletes the file.
 - `bin/moveit-pro@.service` — systemd template unit. Runs `moveit_pro run --no-browser` as `%i`. Restarts on failure. Reads optional environment from `/etc/default/moveit-pro`.
-- `bin/notify-crash.py` — posts to Slack via `ExecStopPost` when the service exits non-zero. Reads `SLACK_WEBHOOK_URL` from the environment; if unset, the notification is skipped.
+- `bin/notify-crash.py` — posts to Slack and opens/updates a GitHub issue via `ExecStopPost` when the service exits non-zero. Reads `SLACK_WEBHOOK_URL` and `MOVEIT_CD_GITHUB_TOKEN` from the environment; each notification is skipped if its variable is unset.
+- `bin/notify_lib.py` — shared notification helpers (`slack_post`, `github_issue`) used by both `notify-crash.py` and `cd_objective_lib.py`. Installed to `/usr/lib/moveit-pro-scripts/`. `github_issue` deduplicates by exact title within a label: a repeated failure bumps an occurrence counter and appends a row instead of opening a new issue.
 - `bin/ci-runner.sudoers.template` — sudoers drop-in. `install.sh` substitutes `__CI_USER__` with the local account and installs at `/etc/sudoers.d/<user>-ci`. Grants NOPASSWD on the installer and the user's own systemd unit only.
-- `example_scripts/cd_objective_lib.py` — helper library for sending an Objective goal via rosbridge, used by the example scripts.
+- `example_scripts/cd_objective_lib.py` — helper library for sending an Objective goal via rosbridge, used by the example scripts. On objective timeout or rosbridge failure it posts to Slack, opens/updates a GitHub issue, and stops the systemd unit (via `notify_lib.py`).
 - `example_scripts/3-waypoint-pick-and-place.py`, `example_scripts/ml-segment-image.py`, `example_scripts/move-all-boxes.py` — example smoke-test scripts that drive an Objective on `localhost:3201` rosbridge.
 
 ## Install
@@ -27,6 +28,7 @@ sudo ./install.sh
 This installs:
 
 - The objective scripts to `/usr/bin/`.
+- `cd_objective_lib.py` and `notify_lib.py` to `/usr/lib/moveit-pro-scripts/`.
 - `notify-crash.py` to `/usr/bin/`.
 - `install-moveit-pro` to `/usr/local/sbin/` (root-owned, `0755`).
 - `/var/cache/moveit-pro/` as a root-owned download cache.
@@ -60,17 +62,28 @@ WORKSPACE_PIN_TO_RELEASE=false
 
 `WORKSPACE_REPO` is regex-restricted to `https://github.com/<owner>/<repo>.git` or `git@github.com:<owner>/<repo>.git`. For the SSH form, the CI user needs a deploy key with read-only access.
 
-### Optional: Slack crash notifications
+### Optional: failure notifications (Slack + GitHub issues)
 
-Set `SLACK_WEBHOOK_URL` in `/etc/default/moveit-pro` (root-owned). The systemd unit reads this file via `EnvironmentFile=`, so `notify-crash.py` and `cd_objective_lib.py` will post crash and CD-failure events to the webhook:
+Both notifiers read their config from `/etc/default/moveit-pro` (root-owned). The systemd unit loads this file via `EnvironmentFile=`, so `notify-crash.py` and `cd_objective_lib.py` pick it up for crash and CD-failure events. Each notifier is independent: set only the variables you want.
 
 ```bash
 sudo install -m 0640 -o root -g root /dev/stdin /etc/default/moveit-pro <<'EOF'
+# Slack incoming webhook. Unset -> Slack skipped.
 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+
+# GitHub issue on failure. Unset -> issue creation skipped.
+MOVEIT_CD_GITHUB_TOKEN=github_pat_xxx
+# Optional overrides (defaults shown):
+# MOVEIT_CD_ISSUE_REPO=PickNikRobotics/moveit_pro
+# MOVEIT_CD_ISSUE_LABEL=qa-deployment-failure
 EOF
 ```
 
-If the variable is unset, notifications are silently skipped.
+If a variable is unset, that notification is silently skipped — this is how non-QA machines opt out of issue creation.
+
+`MOVEIT_CD_GITHUB_TOKEN` must be a **fine-grained PAT scoped to the issue repo with `Issues: Read and write` and nothing else** — the narrowest credential that can file an issue. Do not grant `Contents` or any other scope: a QA machine is a higher-exposure host, and the token only needs to open and comment on issues. The `qa-deployment-failure` label must already exist on the repo (the API does not create labels on demand).
+
+Repeated failures of the same kind on the same machine deduplicate to a single issue (matched by title within the label) — each recurrence bumps an occurrence counter, appends a table row with the version/time/reason, and adds a comment for visibility.
 
 ## Verify the install
 

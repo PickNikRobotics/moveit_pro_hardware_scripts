@@ -43,4 +43,4 @@ To wrap your own objective into a forever-loop driver, copy `example_scripts/cd_
 - `sudo -n` prompts for password → sudoers drop-in missing. Re-run `sudo ./install.sh`.
 - `Invalid version format` → version string does not match `X.Y.Z` or `X.Y.Z-rcN`.
 - 404 from curl → version does not exist on `download.picknik.ai`.
-- Service fails to start → check `journalctl -u moveit-pro@$USER.service -e`. If `SLACK_WEBHOOK_URL` is set in `/etc/default/moveit-pro`, `notify-crash.py` will also post to Slack.
+- Service fails to start → check `journalctl -u moveit-pro@$USER.service -e`. If `SLACK_WEBHOOK_URL` / `MOVEIT_CD_GITHUB_TOKEN` are set in `/etc/default/moveit-pro`, `notify-crash.py` also posts to Slack and opens a GitHub issue.

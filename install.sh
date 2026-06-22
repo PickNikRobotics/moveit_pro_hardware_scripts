@@ -42,9 +42,10 @@ if ! python3 -c "import roslibpy" 2>/dev/null; then
     python3 -m pip install "${PIP_ARGS[@]}" roslibpy
 fi
 
-echo "Installing CD objective shared library to /usr/lib/moveit-pro-scripts/"
+echo "Installing shared libraries to /usr/lib/moveit-pro-scripts/"
 sudo install -d -m 0755 -o root -g root /usr/lib/moveit-pro-scripts
 sudo install -m 644 "$SCRIPT_DIR/example_scripts/cd_objective_lib.py" /usr/lib/moveit-pro-scripts/cd_objective_lib.py
+sudo install -m 644 "$SCRIPT_DIR/bin/notify_lib.py" /usr/lib/moveit-pro-scripts/notify_lib.py
 
 echo "Installing objective scripts to /usr/bin/"
 sudo install -m 755 "$SCRIPT_DIR/example_scripts/3-waypoint-pick-and-place.py" /usr/bin/3-waypoint-pick-and-place.py
